@@ -2,41 +2,110 @@ import streamlit as st
 import pandas as pd
 import sqlite3
 import google.generativeai as genai
-import json
-import re
 import os
+import re
 
-# ── Page config ─────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
+# PAGE CONFIG
+# ─────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="AI SQL Copilot",
     page_icon="🧠",
-    layout="wide",
+    layout="wide"
 )
 
-# ── Gemini setup ─────────────────────────────────────────────
-def get_gemini_model():
+# ─────────────────────────────────────────────────────────────
+# SAAS STYLE UI
+# ─────────────────────────────────────────────────────────────
+st.markdown("""
+<style>
+
+.main {
+    background-color: #0f172a;
+    color: white;
+}
+
+section[data-testid="stSidebar"] {
+    background-color: #111827;
+}
+
+h1 {
+    font-size: 34px !important;
+    font-weight: 700;
+}
+
+/* Card */
+.card {
+    background: #1e293b;
+    padding: 16px;
+    border-radius: 12px;
+    border: 1px solid #334155;
+    margin-bottom: 12px;
+}
+
+/* SQL block */
+.sql-block {
+    background: #0b1220;
+    color: #60a5fa;
+    padding: 12px;
+    border-radius: 10px;
+    font-family: monospace;
+    border: 1px solid #1e3a8a;
+}
+
+/* Insight */
+.insight-box {
+    background: #0f172a;
+    border-left: 4px solid #22c55e;
+    padding: 12px;
+    border-radius: 8px;
+    color: #d1fae5;
+}
+
+/* Input */
+.stTextInput input {
+    background-color: #0b1220;
+    color: white;
+    border-radius: 10px;
+    border: 1px solid #334155;
+}
+
+/* Button */
+.stButton button {
+    background-color: #2563eb;
+    color: white;
+    border-radius: 8px;
+}
+
+</style>
+""", unsafe_allow_html=True)
+
+# ─────────────────────────────────────────────────────────────
+# GEMINI SETUP
+# ─────────────────────────────────────────────────────────────
+def get_model():
     api_key = st.secrets.get("GEMINI_API_KEY") or os.environ.get("GEMINI_API_KEY")
     if not api_key:
-        st.error("❌ Missing GEMINI_API_KEY in secrets or environment")
+        st.error("❌ Missing GEMINI_API_KEY")
         st.stop()
 
     genai.configure(api_key=api_key)
     return genai.GenerativeModel("gemini-1.5-flash")
 
-
-# ── Load CSV into SQLite ─────────────────────────────────────
-def load_csv_to_sqlite(uploaded_files):
+# ─────────────────────────────────────────────────────────────
+# DATA LOADING
+# ─────────────────────────────────────────────────────────────
+def load_csv(files):
     conn = sqlite3.connect(":memory:")
 
-    for f in uploaded_files:
+    for f in files:
         df = pd.read_csv(f)
-        table_name = os.path.splitext(f.name)[0].replace(" ", "_").lower()
-        df.to_sql(table_name, conn, if_exists="replace", index=False)
+        table = f.name.replace(".csv", "").replace(" ", "_")
+        df.to_sql(table, conn, index=False, if_exists="replace")
 
     return conn
 
 
-# ── Get schema ───────────────────────────────────────────────
 def get_schema(conn):
     schema = {}
     cursor = conn.cursor()
@@ -45,59 +114,45 @@ def get_schema(conn):
         "SELECT name FROM sqlite_master WHERE type='table';"
     ).fetchall()
 
-    for (table,) in tables:
-        cols = cursor.execute(f"PRAGMA table_info({table})").fetchall()
-        schema[table] = [(c[1], c[2]) for c in cols]
+    for (t,) in tables:
+        cols = cursor.execute(f"PRAGMA table_info({t})").fetchall()
+        schema[t] = [(c[1], c[2]) for c in cols]
 
     return schema
 
 
-def schema_to_text(schema):
-    text = []
-    for table, cols in schema.items():
-        col_text = ", ".join([f"{c[0]} ({c[1]})" for c in cols])
-        text.append(f"{table}: {col_text}")
-    return "\n".join(text)
+def schema_text(schema):
+    out = []
+    for t, cols in schema.items():
+        col_str = ", ".join([f"{c[0]} ({c[1]})" for c in cols])
+        out.append(f"{t}: {col_str}")
+    return "\n".join(out)
 
 
-# ── Extract SQL from AI response ─────────────────────────────
+# ─────────────────────────────────────────────────────────────
+# SQL + AI
+# ─────────────────────────────────────────────────────────────
 def extract_sql(text):
     match = re.search(r"```sql(.*?)```", text, re.DOTALL)
     if match:
         return match.group(1).strip()
 
     match = re.search(r"(SELECT[\s\S]+)", text, re.IGNORECASE)
-    if match:
-        return match.group(1).strip()
-
-    return ""
+    return match.group(1).strip() if match else ""
 
 
-# ── Run SQL ───────────────────────────────────────────────────
-def run_query(conn, sql):
-    try:
-        df = pd.read_sql_query(sql, conn)
-        return df, None
-    except Exception as e:
-        return None, str(e)
-
-
-# ── Gemini prompt ────────────────────────────────────────────
-def ask_gemini(model, schema_text, question, error=None):
+def ask_ai(model, schema_txt, question, error=None):
     prompt = f"""
-You are an expert data analyst.
-
-You are working with a SQLite database.
+You are a senior data analyst.
 
 Schema:
-{schema_text}
+{schema_txt}
 
 Rules:
-- Always return a SQL query inside ```sql ``` block
-- Only use SELECT queries
-- Then explain the query in simple English
-- Then add INSIGHT section with business insights
-- If error exists, fix it
+- Return SQL in ```sql``` block
+- Only SELECT queries
+- Then explain in simple English
+- Then add INSIGHT section
 
 User question:
 {question}
@@ -105,93 +160,129 @@ User question:
 Error (if any):
 {error}
 """
-
-    response = model.generate_content(prompt)
-    return response.text
+    return model.generate_content(prompt).text
 
 
-# ── App state ────────────────────────────────────────────────
+def run_sql(conn, sql):
+    try:
+        return pd.read_sql_query(sql, conn), None
+    except Exception as e:
+        return None, str(e)
+
+# ─────────────────────────────────────────────────────────────
+# SESSION STATE
+# ─────────────────────────────────────────────────────────────
 if "conn" not in st.session_state:
     st.session_state.conn = None
 
 if "schema" not in st.session_state:
     st.session_state.schema = None
 
-if "history" not in st.session_state:
-    st.session_state.history = []
+# ─────────────────────────────────────────────────────────────
+# SIDEBAR (SAAS PANEL)
+# ─────────────────────────────────────────────────────────────
+with st.sidebar:
 
+    st.title("🧠 SQL Copilot")
 
-# ── UI ───────────────────────────────────────────────────────
-st.title("🧠 AI SQL Copilot (Gemini Powered)")
+    st.markdown("""
+    <div class="card">
+    <h4>📌 What is this?</h4>
+    Turn English into SQL and explore your data instantly.
+    </div>
+    """, unsafe_allow_html=True)
 
-mode = st.radio("Select data source", ["Upload CSV", "Demo DB"])
+    st.subheader("📂 Data Source")
 
-# ── CSV MODE ────────────────────────────────────────────────
-if mode == "Upload CSV":
-    files = st.file_uploader("Upload CSV files", type=["csv"], accept_multiple_files=True)
+    mode = st.radio("Choose", ["Upload CSV", "Demo DB"])
 
-    if files:
-        st.session_state.conn = load_csv_to_sqlite(files)
-        st.session_state.schema = get_schema(st.session_state.conn)
-        st.success("Data loaded successfully!")
+    if mode == "Upload CSV":
+        files = st.file_uploader("Upload CSV", type=["csv"], accept_multiple_files=True)
 
-# ── DEMO MODE ───────────────────────────────────────────────
-else:
-    if st.button("Load Sample Data"):
-        df = pd.DataFrame({
-            "user": ["A", "B", "C", "A"],
-            "sales": [100, 200, 300, 100],
-            "date": ["2024-01-01", "2024-01-02", "2024-01-03", "2024-01-01"]
-        })
+        if files:
+            st.session_state.conn = load_csv(files)
+            st.session_state.schema = get_schema(st.session_state.conn)
+            st.success("Loaded CSVs")
 
-        conn = sqlite3.connect(":memory:")
-        df.to_sql("sales", conn, index=False, if_exists="replace")
+    else:
+        if st.button("Load Demo"):
+            df = pd.DataFrame({
+                "user": ["A", "B", "C", "A"],
+                "sales": [100, 200, 300, 100],
+                "country": ["IN", "US", "UK", "IN"]
+            })
 
-        st.session_state.conn = conn
-        st.session_state.schema = get_schema(conn)
+            conn = sqlite3.connect(":memory:")
+            df.to_sql("sales", conn, index=False, if_exists="replace")
 
-        st.success("Sample DB loaded!")
+            st.session_state.conn = conn
+            st.session_state.schema = get_schema(conn)
 
-# ── If no data ───────────────────────────────────────────────
+            st.success("Demo loaded")
+
+    # ── INSTRUCTIONS PANEL (YOUR REQUEST) ──
+    st.markdown("---")
+
+    st.markdown("""
+    <div class="card">
+    <h4>🚀 How to use</h4>
+    <ol>
+        <li>Upload CSV or load demo</li>
+        <li>Check schema</li>
+        <li>Ask questions in English</li>
+        <li>Get SQL + insights</li>
+    </ol>
+
+    <h4>💡 Try asking</h4>
+    <ul>
+        <li>Top customers by sales</li>
+        <li>Find duplicates</li>
+        <li>Revenue by country</li>
+    </ul>
+    </div>
+    """, unsafe_allow_html=True)
+
+# ─────────────────────────────────────────────────────────────
+# MAIN UI
+# ─────────────────────────────────────────────────────────────
+st.title("📊 AI SQL Copilot")
+
 if not st.session_state.conn:
-    st.info("Upload CSV or load demo to start")
+    st.markdown("""
+    <div class="card">
+    👈 Start by uploading data or loading demo from sidebar
+    </div>
+    """, unsafe_allow_html=True)
     st.stop()
 
-# ── Show schema ──────────────────────────────────────────────
-st.subheader("📊 Schema")
+st.subheader("🗂 Schema")
+st.write(st.session_state.schema)
 
-for table, cols in st.session_state.schema.items():
-    st.write(f"**{table}**")
-    st.write(cols)
+question = st.text_input("💬 Ask your data anything")
 
-# ── Chat input ───────────────────────────────────────────────
-question = st.text_input("Ask your data anything:")
-
+# ─────────────────────────────────────────────────────────────
+# EXECUTION
+# ─────────────────────────────────────────────────────────────
 if question:
-    model = get_gemini_model()
 
-    schema_text = schema_to_text(st.session_state.schema)
+    model = get_model()
+    schema_txt = schema_text(st.session_state.schema)
 
-    response = ask_gemini(model, schema_text, question)
+    response = ask_ai(model, schema_txt, question)
 
     sql = extract_sql(response)
 
-    st.subheader("🧠 AI Response")
+    st.markdown("### 🧠 AI Response")
     st.write(response)
 
     if sql:
-        st.subheader("⚡ Executed SQL")
-        st.code(sql, language="sql")
+        st.markdown("### ⚡ SQL")
+        st.markdown(f'<div class="sql-block">{sql}</div>', unsafe_allow_html=True)
 
-        df, err = run_query(st.session_state.conn, sql)
+        df, err = run_sql(st.session_state.conn, sql)
 
         if err:
             st.error(err)
         else:
-            st.subheader("📊 Result")
+            st.markdown("### 📊 Results")
             st.dataframe(df)
-
-    st.session_state.history.append({
-        "q": question,
-        "r": response
-    })
