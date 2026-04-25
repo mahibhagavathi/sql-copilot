@@ -5,84 +5,85 @@ import google.generativeai as genai
 import os
 import re
 
-# ─────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────
 # PAGE CONFIG
-# ─────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────
 st.set_page_config(
-    page_title="AI SQL Copilot",
+    page_title="QueryMeThis 🧠",
     page_icon="🧠",
     layout="wide"
 )
 
-# ─────────────────────────────────────────────────────────────
-# SAAS STYLE UI
-# ─────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────
+# SAAS UI (FIXED LIGHT THEME)
+# ─────────────────────────────────────────────
 st.markdown("""
 <style>
 
 .main {
-    background-color: #0f172a;
+    background-color: #f8fafc;
+    color: #111827;
+}
+
+/* Sidebar */
+section[data-testid="stSidebar"] {
+    background-color: #111827;
     color: white;
 }
 
-section[data-testid="stSidebar"] {
-    background-color: #111827;
-}
-
-h1 {
-    font-size: 34px !important;
-    font-weight: 700;
-}
-
-/* Card */
+/* Cards */
 .card {
-    background: #1e293b;
+    background: white;
     padding: 16px;
     border-radius: 12px;
-    border: 1px solid #334155;
+    border: 1px solid #e5e7eb;
     margin-bottom: 12px;
+    box-shadow: 0px 1px 4px rgba(0,0,0,0.05);
 }
 
 /* SQL block */
 .sql-block {
     background: #0b1220;
-    color: #60a5fa;
+    color: #38bdf8;
     padding: 12px;
     border-radius: 10px;
     font-family: monospace;
     border: 1px solid #1e3a8a;
+    overflow-x: auto;
 }
 
-/* Insight */
+/* Insight box */
 .insight-box {
-    background: #0f172a;
+    background: #ecfdf5;
     border-left: 4px solid #22c55e;
     padding: 12px;
     border-radius: 8px;
-    color: #d1fae5;
+    color: #065f46;
 }
 
-/* Input */
+/* Inputs */
 .stTextInput input {
-    background-color: #0b1220;
-    color: white;
     border-radius: 10px;
-    border: 1px solid #334155;
+    border: 1px solid #d1d5db;
+    padding: 10px;
+    color: #111827;
+    background: white;
 }
 
-/* Button */
+/* Buttons */
 .stButton button {
     background-color: #2563eb;
     color: white;
     border-radius: 8px;
+    font-weight: 600;
 }
 
 </style>
 """, unsafe_allow_html=True)
 
-# ─────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────
 # GEMINI SETUP
-# ─────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────
 def get_model():
     api_key = st.secrets.get("GEMINI_API_KEY") or os.environ.get("GEMINI_API_KEY")
     if not api_key:
@@ -92,9 +93,9 @@ def get_model():
     genai.configure(api_key=api_key)
     return genai.GenerativeModel("gemini-1.5-flash")
 
-# ─────────────────────────────────────────────────────────────
-# DATA LOADING
-# ─────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────
+# LOAD CSV → SQLITE
+# ─────────────────────────────────────────────
 def load_csv(files):
     conn = sqlite3.connect(":memory:")
 
@@ -105,7 +106,27 @@ def load_csv(files):
 
     return conn
 
+# ─────────────────────────────────────────────
+# DEMO DATABASE (IMPROVED)
+# ─────────────────────────────────────────────
+def create_demo_db():
+    df = pd.DataFrame({
+        "order_id": range(1, 21),
+        "user_id": [101, 102, 103, 104, 105] * 4,
+        "product": ["Laptop", "Phone", "Shoes", "Watch", "Headphones"] * 4,
+        "category": ["Electronics", "Electronics", "Fashion", "Accessories", "Electronics"] * 4,
+        "amount": [1200, 800, 120, 250, 150] * 4,
+        "country": ["IN", "US", "UK", "IN", "US"] * 4,
+        "date": pd.date_range("2024-01-01", periods=20)
+    })
 
+    conn = sqlite3.connect(":memory:")
+    df.to_sql("sales", conn, index=False, if_exists="replace")
+    return conn
+
+# ─────────────────────────────────────────────
+# SCHEMA
+# ─────────────────────────────────────────────
 def get_schema(conn):
     schema = {}
     cursor = conn.cursor()
@@ -128,20 +149,17 @@ def schema_text(schema):
         out.append(f"{t}: {col_str}")
     return "\n".join(out)
 
-
-# ─────────────────────────────────────────────────────────────
-# SQL + AI
-# ─────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────
+# AI SQL GENERATION
+# ─────────────────────────────────────────────
 def extract_sql(text):
     match = re.search(r"```sql(.*?)```", text, re.DOTALL)
     if match:
         return match.group(1).strip()
-
-    match = re.search(r"(SELECT[\s\S]+)", text, re.IGNORECASE)
-    return match.group(1).strip() if match else ""
+    return ""
 
 
-def ask_ai(model, schema_txt, question, error=None):
+def ask_ai(model, schema_txt, question):
     prompt = f"""
 You are a senior data analyst.
 
@@ -152,13 +170,10 @@ Rules:
 - Return SQL in ```sql``` block
 - Only SELECT queries
 - Then explain in simple English
-- Then add INSIGHT section
+- Then give insights
 
-User question:
+Question:
 {question}
-
-Error (if any):
-{error}
 """
     return model.generate_content(prompt).text
 
@@ -169,32 +184,32 @@ def run_sql(conn, sql):
     except Exception as e:
         return None, str(e)
 
-# ─────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────
 # SESSION STATE
-# ─────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────
 if "conn" not in st.session_state:
     st.session_state.conn = None
 
 if "schema" not in st.session_state:
     st.session_state.schema = None
 
-# ─────────────────────────────────────────────────────────────
-# SIDEBAR (SAAS PANEL)
-# ─────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────
+# SIDEBAR (SAAS ONBOARDING)
+# ─────────────────────────────────────────────
 with st.sidebar:
 
-    st.title("🧠 SQL Copilot")
+    st.title("🧠 QueryMeThis")
 
     st.markdown("""
     <div class="card">
     <h4>📌 What is this?</h4>
-    Turn English into SQL and explore your data instantly.
+    Ask questions in English → get SQL + insights instantly.
     </div>
     """, unsafe_allow_html=True)
 
     st.subheader("📂 Data Source")
 
-    mode = st.radio("Choose", ["Upload CSV", "Demo DB"])
+    mode = st.radio("Choose", ["Upload CSV", "Demo Database"])
 
     if mode == "Upload CSV":
         files = st.file_uploader("Upload CSV", type=["csv"], accept_multiple_files=True)
@@ -202,74 +217,66 @@ with st.sidebar:
         if files:
             st.session_state.conn = load_csv(files)
             st.session_state.schema = get_schema(st.session_state.conn)
-            st.success("Loaded CSVs")
+            st.success("CSV loaded!")
 
     else:
-        if st.button("Load Demo"):
-           df = pd.DataFrame({
-    "order_id": range(1, 21),
-    "user_id": [101, 102, 103, 104, 105] * 4,
-    "product": [
-        "Laptop", "Phone", "Shoes", "Watch", "Headphones"
-    ] * 4,
-    "category": [
-        "Electronics", "Electronics", "Fashion", "Accessories", "Electronics"
-    ] * 4,
-    "amount": [1200, 800, 120, 250, 150] * 4,
-    "country": ["IN", "US", "UK", "IN", "US"] * 4,
-    "date": pd.date_range("2024-01-01", periods=20)
-})
-            conn = sqlite3.connect(":memory:")
-            df.to_sql("sales", conn, index=False, if_exists="replace")
+        if st.button("Load Demo Dataset"):
+            st.session_state.conn = create_demo_db()
+            st.session_state.schema = get_schema(st.session_state.conn)
+            st.success("Demo loaded!")
 
-            st.session_state.conn = conn
-            st.session_state.schema = get_schema(conn)
-
-            st.success("Demo loaded")
-
-    # ── INSTRUCTIONS PANEL (YOUR REQUEST) ──
+    # ── Instructions (IMPORTANT UX ADDITION)
     st.markdown("---")
 
     st.markdown("""
     <div class="card">
     <h4>🚀 How to use</h4>
     <ol>
-        <li>Upload CSV or load demo</li>
+        <li>Select data source</li>
         <li>Check schema</li>
         <li>Ask questions in English</li>
-        <li>Get SQL + insights</li>
+        <li>Get SQL + results + insights</li>
     </ol>
 
     <h4>💡 Try asking</h4>
     <ul>
-        <li>Top customers by sales</li>
-        <li>Find duplicates</li>
+        <li>Top products by revenue</li>
         <li>Revenue by country</li>
+        <li>Find duplicate users</li>
     </ul>
     </div>
     """, unsafe_allow_html=True)
 
-# ─────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────
 # MAIN UI
-# ─────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────
 st.title("📊 AI SQL Copilot")
 
 if not st.session_state.conn:
     st.markdown("""
     <div class="card">
-    👈 Start by uploading data or loading demo from sidebar
+    👈 Start by selecting a dataset from sidebar
     </div>
     """, unsafe_allow_html=True)
     st.stop()
 
+# ── SCHEMA DISPLAY (FIXED)
 st.subheader("🗂 Schema")
-st.write(st.session_state.schema)
 
+for table, cols in st.session_state.schema.items():
+    st.markdown(f"""
+    <div class="card">
+        <b>📌 {table}</b><br><br>
+        {"<br>".join([f"• {c[0]} <span style='color:gray'>({c[1]})</span>" for c in cols])}
+    </div>
+    """, unsafe_allow_html=True)
+
+# ── INPUT
 question = st.text_input("💬 Ask your data anything")
 
-# ─────────────────────────────────────────────────────────────
-# EXECUTION
-# ─────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────
+# EXECUTION FLOW
+# ─────────────────────────────────────────────
 if question:
 
     model = get_model()
@@ -283,7 +290,7 @@ if question:
     st.write(response)
 
     if sql:
-        st.markdown("### ⚡ SQL")
+        st.markdown("### ⚡ SQL Query")
         st.markdown(f'<div class="sql-block">{sql}</div>', unsafe_allow_html=True)
 
         df, err = run_sql(st.session_state.conn, sql)
@@ -292,4 +299,4 @@ if question:
             st.error(err)
         else:
             st.markdown("### 📊 Results")
-            st.dataframe(df)
+            st.dataframe(df, use_container_width=True)
