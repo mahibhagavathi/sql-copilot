@@ -206,12 +206,19 @@ with st.sidebar:
 
     else:
         if st.button("Load Demo"):
-            df = pd.DataFrame({
-                "user": ["A", "B", "C", "A"],
-                "sales": [100, 200, 300, 100],
-                "country": ["IN", "US", "UK", "IN"]
-            })
-
+           df = pd.DataFrame({
+    "order_id": range(1, 21),
+    "user_id": [101, 102, 103, 104, 105] * 4,
+    "product": [
+        "Laptop", "Phone", "Shoes", "Watch", "Headphones"
+    ] * 4,
+    "category": [
+        "Electronics", "Electronics", "Fashion", "Accessories", "Electronics"
+    ] * 4,
+    "amount": [1200, 800, 120, 250, 150] * 4,
+    "country": ["IN", "US", "UK", "IN", "US"] * 4,
+    "date": pd.date_range("2024-01-01", periods=20)
+})
             conn = sqlite3.connect(":memory:")
             df.to_sql("sales", conn, index=False, if_exists="replace")
 
