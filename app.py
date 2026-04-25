@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-from sqlalchemy import create_engine, inspect
+import sqlite3
 import google.generativeai as genai
 import os
 import re
@@ -15,170 +15,222 @@ st.set_page_config(
 )
 
 st.title("🧠 AI SQL Copilot")
-st.write("Connect your data, review the schema, and chat with your database.")
+st.write("Ask questions in plain English → get SQL + results + insights")
 
 # ─────────────────────────────────────────────
 # GEMINI SETUP
 # ─────────────────────────────────────────────
 def get_model():
     api_key = st.secrets.get("GEMINI_API_KEY") or os.environ.get("GEMINI_API_KEY")
+
     if not api_key:
-        st.error("❌ Missing GEMINI_API_KEY. Please set it in secrets or environment variables.")
+        st.error("Missing GEMINI_API_KEY")
         st.stop()
+
     genai.configure(api_key=api_key)
     return genai.GenerativeModel("gemini-1.5-flash-latest")
 
 # ─────────────────────────────────────────────
-# DATABASE ENGINES
+# DATA LOADING
 # ─────────────────────────────────────────────
-def get_engine(connection_type, **kwargs):
-    """Factory to create SQLAlchemy engines based on user input."""
-    try:
-        if connection_type == "SQLite (In-Memory)":
-            return create_engine("sqlite:///:memory:")
-        
-        elif connection_type == "External SQL Database":
-            # Expecting a SQLAlchemy URI like: postgresql://user:pass@host:port/dbname
-            uri = kwargs.get("uri")
-            if not uri:
-                st.error("Please provide a valid Connection URI")
-                return None
-            return create_engine(uri)
-    except Exception as e:
-        st.error(f"Connection Error: {e}")
-        return None
+def load_csv(files):
+    conn = sqlite3.connect(":memory:")
+    for f in files:
+        df = pd.read_csv(f)
+        table = f.name.replace(".csv", "").replace(" ", "_").lower()
+        df.to_sql(table, conn, index=False, if_exists="replace")
+    return conn
 
-# ─────────────────────────────────────────────
-# SCHEMA & METADATA
-# ─────────────────────────────────────────────
-def fetch_schema_info(engine):
-    """Uses SQLAlchemy inspection to get tables and columns."""
-    schema_dict = {}
-    try:
-        inspector = inspect(engine)
-        for table_name in inspector.get_table_names():
-            columns = inspector.get_columns(table_name)
-            schema_dict[table_name] = [{"name": c["name"], "type": str(c["type"])} for c in columns]
-        return schema_dict
-    except Exception as e:
-        st.error(f"Error fetching schema: {e}")
-        return {}
 
-def schema_to_text(schema_dict):
-    """Converts schema dict to a prompt-friendly string."""
-    text_parts = []
-    for table, cols in schema_dict.items():
-        col_str = ", ".join([f"{c['name']} ({c['type']})" for c in cols])
-        text_parts.append(f"Table '{table}' has columns: {col_str}")
-    return "\n".join(text_parts)
+def create_demo_db():
+    df = pd.DataFrame({
+        "order_id": range(1, 21),
+        "user_id": [101, 102, 103, 104, 105] * 4,
+        "product": ["Laptop", "Phone", "Shoes", "Watch", "Headphones"] * 4,
+        "category": ["Electronics", "Electronics", "Fashion", "Accessories", "Electronics"] * 4,
+        "amount": [1200, 800, 120, 250, 150] * 4,
+        "country": ["IN", "US", "UK", "IN", "US"] * 4,
+        "date": pd.date_range("2024-01-01", periods=20)
+    })
+
+    conn = sqlite3.connect(":memory:")
+    df.to_sql("sales", conn, index=False, if_exists="replace")
+    return conn
 
 # ─────────────────────────────────────────────
-# AI LOGIC
+# SCHEMA
 # ─────────────────────────────────────────────
-def ask_ai(model, schema_txt, question):
-    prompt = f"""
-    You are an expert SQL Data Analyst.
-    
-    Database Schema:
-    {schema_txt}
+def get_schema(conn):
+    schema = {}
+    cursor = conn.cursor()
 
-    Task:
-    1. Provide a standard SQL SELECT query to answer: "{question}"
-    2. Wrap the SQL in ```sql blocks.
-    3. Provide a brief explanation of how the query works.
-    4. Suggest one interesting business insight the user could look for in this data.
+    tables = cursor.execute(
+        "SELECT name FROM sqlite_master WHERE type='table';"
+    ).fetchall()
 
-    Constraints:
-    - Use standard SQL syntax.
-    - If the user asks for something not in the schema, politely explain why.
-    """
-    response = model.generate_content(prompt)
-    return response.text
+    for (t,) in tables:
+        cols = cursor.execute(f"PRAGMA table_info({t})").fetchall()
+        schema[t] = [(c[1], c[2]) for c in cols]
 
+    return schema
+
+
+def schema_text(schema):
+    out = []
+    for t, cols in schema.items():
+        col_str = ", ".join([f"{c[0]} ({c[1]})" for c in cols])
+        out.append(f"{t}: {col_str}")
+    return "\n".join(out)
+
+# ─────────────────────────────────────────────
+# AI
+# ─────────────────────────────────────────────
 def extract_sql(text):
     match = re.search(r"```sql(.*?)```", text, re.DOTALL)
-    return match.group(1).strip() if match else None
+    return match.group(1).strip() if match else ""
+
+
+def ask_ai(model, schema_txt, question):
+    prompt = f"""
+You are a data analyst.
+
+Schema:
+{schema_txt}
+
+Return:
+- SQL in ```sql``` block
+- Explanation
+- Insight
+
+Question:
+{question}
+"""
+    return model.generate_content(prompt).text
+
+
+def run_sql(conn, sql):
+    try:
+        return pd.read_sql_query(sql, conn), None
+    except Exception as e:
+        return None, str(e)
 
 # ─────────────────────────────────────────────
-# SIDEBAR / CONNECTION MANAGEMENT
+# SESSION STATE
+# ─────────────────────────────────────────────
+if "conn" not in st.session_state:
+    st.session_state.conn = None
+
+if "schema" not in st.session_state:
+    st.session_state.schema = None
+
+if "preview_df" not in st.session_state:
+    st.session_state.preview_df = None
+
+# ─────────────────────────────────────────────
+# SIDEBAR (ENHANCED UX)
 # ─────────────────────────────────────────────
 with st.sidebar:
-    st.header("🔌 Data Source")
-    
-    source_type = st.selectbox("Select Source", 
-        ["Demo Dataset", "Upload CSV", "External SQL Database"]
-    )
+    st.header("🧠 SQL Copilot")
 
-    # Initialize or reset engine
-    if "engine" not in st.session_state:
-        st.session_state.engine = None
-    if "schema" not in st.session_state:
-        st.session_state.schema = None
+    mode = st.radio("Select Data Source", ["Upload CSV", "Demo Database"])
 
-    if source_type == "Demo Dataset":
-        if st.button("Load Demo Data"):
-            engine = get_engine("SQLite (In-Memory)")
-            df = pd.DataFrame({
-                "order_id": [1, 2, 3], "amount": [100, 200, 150], "category": ["Tech", "Fashion", "Tech"]
-            })
-            df.to_sql("sales", engine, index=False)
-            st.session_state.engine = engine
-            st.session_state.schema = fetch_schema_info(engine)
-            st.success("Demo Loaded!")
+    # ── DATA LOAD ──
+    if mode == "Upload CSV":
+        files = st.file_uploader("Upload CSV files", type=["csv"], accept_multiple_files=True)
 
-    elif source_type == "Upload CSV":
-        uploaded_files = st.file_uploader("Upload CSVs", type="csv", accept_multiple_files=True)
-        if uploaded_files and st.button("Process Files"):
-            engine = get_engine("SQLite (In-Memory)")
-            for f in uploaded_files:
-                table_name = f.name.split('.')[0].replace(" ", "_").lower()
-                pd.read_csv(f).to_sql(table_name, engine, index=False)
-            st.session_state.engine = engine
-            st.session_state.schema = fetch_schema_info(engine)
-            st.success(f"Loaded {len(uploaded_files)} tables!")
+        if files:
+            conn = load_csv(files)
+            st.session_state.conn = conn
+            st.session_state.schema = get_schema(conn)
 
-    elif source_type == "External SQL Database":
-        st.info("Format: postgresql://user:pass@host:port/dbname")
-        db_uri = st.text_input("Connection URI", type="password")
-        if st.button("Connect"):
-            engine = get_engine("External SQL Database", uri=db_uri)
-            if engine:
-                st.session_state.engine = engine
-                st.session_state.schema = fetch_schema_info(engine)
-                st.success("Connected to External DB!")
+            # preview ANY table
+            table = list(st.session_state.schema.keys())[0]
+            st.session_state.preview_df = pd.read_sql_query(f"SELECT * FROM {table} LIMIT 10", conn)
+
+            st.success("CSV loaded")
+
+    else:
+        if st.button("Load Demo Dataset"):
+            conn = create_demo_db()
+            st.session_state.conn = conn
+            st.session_state.schema = get_schema(conn)
+
+            st.session_state.preview_df = pd.read_sql_query("SELECT * FROM sales LIMIT 10", conn)
+
+            st.success("Demo loaded")
+
+    # ── SAMPLE QUESTIONS ──
+    st.divider()
+    st.subheader("💡 Sample Questions")
+
+    st.write("""
+    - Top products by revenue  
+    - Revenue by country  
+    - Find duplicate users  
+    - Average order value  
+    - Sales trend over time  
+    """)
+
+    # ── DATA PREVIEW (IMPORTANT FEATURE) ──
+    st.divider()
+    st.subheader("👀 Data Preview")
+
+    if st.session_state.preview_df is not None:
+        st.dataframe(st.session_state.preview_df, use_container_width=True)
+    else:
+        st.info("Load dataset to preview")
+
+    # ── HOW IT WORKS ──
+    st.divider()
+    st.subheader("ℹ️ How it works")
+    st.write("""
+    1. Load data  
+    2. View schema  
+    3. Ask question  
+    4. Get SQL + results  
+    """)
 
 # ─────────────────────────────────────────────
-# MAIN INTERFACE
+# MAIN UI
 # ─────────────────────────────────────────────
-if st.session_state.engine:
-    # --- SCHEMA VIEWER ---
-    with st.expander("🗂️ View Database Schema", expanded=False):
-        if st.session_state.schema:
-            for table, cols in st.session_state.schema.items():
-                st.markdown(f"**Table: `{table}`**")
-                st.table(pd.DataFrame(cols))
+if not st.session_state.conn:
+    st.info("👉 Select dataset from sidebar to begin")
+    st.stop()
+
+st.subheader("🗂 Schema")
+
+for table, cols in st.session_state.schema.items():
+    st.write(f"**{table}**")
+    st.write(cols)
+
+# ─────────────────────────────────────────────
+# QUERY INPUT
+# ─────────────────────────────────────────────
+question = st.text_input("💬 Ask your data anything")
+
+# ─────────────────────────────────────────────
+# EXECUTION
+# ─────────────────────────────────────────────
+if question:
+
+    model = get_model()
+    schema_txt = schema_text(st.session_state.schema)
+
+    response = ask_ai(model, schema_txt, question)
+
+    sql = extract_sql(response)
+
+    st.subheader("🧠 AI Response")
+    st.write(response)
+
+    if sql:
+        st.subheader("⚡ SQL Query")
+        st.code(sql, language="sql")
+
+        df, err = run_sql(st.session_state.conn, sql)
+
+        if err:
+            st.error(err)
         else:
-            st.warning("No schema detected.")
-
-    # --- CHAT INTERFACE ---
-    user_query = st.chat_input("Ask a question about your data...")
-
-    if user_query:
-        with st.spinner("Analyzing..."):
-            model = get_model()
-            schema_txt = schema_to_text(st.session_state.schema)
-            ai_response = ask_ai(model, schema_txt, user_query)
-            
-            st.markdown("### 🤖 AI Analysis")
-            st.write(ai_response)
-
-            sql_query = extract_sql(ai_response)
-            if sql_query:
-                try:
-                    results_df = pd.read_sql(sql_query, st.session_state.engine)
-                    st.markdown("### 📊 Query Results")
-                    st.dataframe(results_df, use_container_width=True)
-                except Exception as e:
-                    st.error(f"The generated SQL failed to run: {e}")
-else:
-    st.info("👋 Use the sidebar to connect a database or upload a file to get started.")
+            st.subheader("📊 Results")
+            st.dataframe(df, use_container_width=True)
