@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 import sqlite3
-import genai.GenerativeModel("gemini-1.5-flash-latest") as genai
+import google.generativeai as genai
 import os
 import re
 
@@ -15,20 +15,22 @@ st.set_page_config(
 )
 
 st.title("🧠 AI SQL Copilot")
-
-st.write("Ask questions in plain English. Get SQL + results + insights.")
+st.write("Ask questions in plain English → get SQL + results + insights")
 
 # ─────────────────────────────────────────────
-# GEMINI SETUP
+# GEMINI SETUP (FIXED MODEL)
 # ─────────────────────────────────────────────
 def get_model():
     api_key = st.secrets.get("GEMINI_API_KEY") or os.environ.get("GEMINI_API_KEY")
+
     if not api_key:
-        st.error("Missing GEMINI_API_KEY")
+        st.error("❌ Missing GEMINI_API_KEY")
         st.stop()
 
     genai.configure(api_key=api_key)
-    return genai.GenerativeModel("gemini-1.5-flash")
+
+    # FIXED MODEL (this is the correct one)
+    return genai.GenerativeModel("gemini-1.5-flash-latest")
 
 # ─────────────────────────────────────────────
 # LOAD CSV → SQLITE
@@ -38,7 +40,7 @@ def load_csv(files):
 
     for f in files:
         df = pd.read_csv(f)
-        table = f.name.replace(".csv", "").replace(" ", "_")
+        table = f.name.replace(".csv", "").replace(" ", "_").lower()
         df.to_sql(table, conn, index=False, if_exists="replace")
 
     return conn
@@ -62,7 +64,7 @@ def create_demo_db():
     return conn
 
 # ─────────────────────────────────────────────
-# SCHEMA
+# SCHEMA HELPERS
 # ─────────────────────────────────────────────
 def get_schema(conn):
     schema = {}
@@ -98,15 +100,18 @@ def extract_sql(text):
 
 def ask_ai(model, schema_txt, question):
     prompt = f"""
-You are a data analyst.
+You are a senior data analyst.
+
+You convert English → SQL.
 
 Schema:
 {schema_txt}
 
-Return:
-1. SQL query in ```sql``` block
-2. Explanation in simple English
-3. Insight about data
+Rules:
+- Return ONLY SQL inside ```sql``` block
+- Only SELECT queries
+- Then explain in simple English
+- Then give 1 insight
 
 Question:
 {question}
@@ -116,7 +121,8 @@ Question:
 
 def run_sql(conn, sql):
     try:
-        return pd.read_sql_query(sql, conn), None
+        df = pd.read_sql_query(sql, conn)
+        return df, None
     except Exception as e:
         return None, str(e)
 
@@ -130,17 +136,17 @@ if "schema" not in st.session_state:
     st.session_state.schema = None
 
 # ─────────────────────────────────────────────
-# SIDEBAR (CLEAN)
+# SIDEBAR
 # ─────────────────────────────────────────────
 with st.sidebar:
-    st.header("🧠 AI SQL Copilot")
+    st.header("🧠 SQL Copilot")
 
     st.write("Convert English → SQL instantly")
 
-    mode = st.radio("Select Data Source", ["Upload CSV", "Demo Database"])
+    mode = st.radio("Choose Data Source", ["Upload CSV", "Demo Database"])
 
     if mode == "Upload CSV":
-        files = st.file_uploader("Upload CSV", type=["csv"], accept_multiple_files=True)
+        files = st.file_uploader("Upload CSV files", type=["csv"], accept_multiple_files=True)
 
         if files:
             st.session_state.conn = load_csv(files)
@@ -155,15 +161,15 @@ with st.sidebar:
 
     st.divider()
 
-    st.subheader("How to use")
+    st.subheader("How it works")
     st.write("""
     1. Load dataset  
     2. View schema  
-    3. Ask questions  
+    3. Ask question  
     4. Get SQL + results  
     """)
 
-    st.subheader("Examples")
+    st.subheader("Example queries")
     st.write("""
     - Top products by revenue  
     - Revenue by country  
@@ -171,19 +177,22 @@ with st.sidebar:
     """)
 
 # ─────────────────────────────────────────────
-# MAIN AREA
+# MAIN UI
 # ─────────────────────────────────────────────
 if not st.session_state.conn:
-    st.info("Please load a dataset from sidebar to begin.")
+    st.info("👉 Select dataset from sidebar to start")
     st.stop()
 
-st.subheader("📊 Schema")
+st.subheader("🗂 Schema")
 
 for table, cols in st.session_state.schema.items():
     st.write(f"**{table}**")
     st.write(cols)
 
-question = st.text_input("Ask your data anything")
+# ─────────────────────────────────────────────
+# USER INPUT
+# ─────────────────────────────────────────────
+question = st.text_input("💬 Ask your data anything")
 
 # ─────────────────────────────────────────────
 # EXECUTION
@@ -201,7 +210,7 @@ if question:
     st.write(response)
 
     if sql:
-        st.subheader("SQL Query")
+        st.subheader("⚡ SQL Query")
         st.code(sql, language="sql")
 
         df, err = run_sql(st.session_state.conn, sql)
@@ -209,5 +218,5 @@ if question:
         if err:
             st.error(err)
         else:
-            st.subheader("Results")
-            st.dataframe(df)
+            st.subheader("📊 Results")
+            st.dataframe(df, use_container_width=True)
