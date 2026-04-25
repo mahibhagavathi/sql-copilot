@@ -15,29 +15,24 @@ st.set_page_config(
 )
 
 st.title("🧠 AI SQL Copilot")
-st.write("Ask questions in plain English → get SQL + results + insights")
+st.write("Ask questions in English → get SQL + insights instantly")
 
 # ─────────────────────────────────────────────
-# GEMINI SETUP
+# GEMINI
 # ─────────────────────────────────────────────
 def get_model():
     api_key = st.secrets.get("GEMINI_API_KEY") or os.environ.get("GEMINI_API_KEY")
-
-    if not api_key:
-        st.error("Missing GEMINI_API_KEY")
-        st.stop()
-
     genai.configure(api_key=api_key)
     return genai.GenerativeModel("gemini-1.5-flash-latest")
 
 # ─────────────────────────────────────────────
-# DATA LOADING
+# DATA
 # ─────────────────────────────────────────────
 def load_csv(files):
     conn = sqlite3.connect(":memory:")
     for f in files:
         df = pd.read_csv(f)
-        table = f.name.replace(".csv", "").replace(" ", "_").lower()
+        table = f.name.replace(".csv", "").replace(" ", "_")
         df.to_sql(table, conn, index=False, if_exists="replace")
     return conn
 
@@ -92,15 +87,13 @@ def extract_sql(text):
 
 def ask_ai(model, schema_txt, question):
     prompt = f"""
-You are a data analyst.
+You are a senior data analyst.
 
 Schema:
 {schema_txt}
 
 Return:
-- SQL in ```sql``` block
-- Explanation
-- Insight
+SQL in ```sql``` block + explanation + insight
 
 Question:
 {question}
@@ -123,80 +116,81 @@ if "conn" not in st.session_state:
 if "schema" not in st.session_state:
     st.session_state.schema = None
 
-if "preview_df" not in st.session_state:
-    st.session_state.preview_df = None
+if "preview" not in st.session_state:
+    st.session_state.preview = None
 
 # ─────────────────────────────────────────────
-# SIDEBAR (ENHANCED UX)
+# 1. HOW IT WORKS (TOP SECTION)
 # ─────────────────────────────────────────────
-with st.sidebar:
-    st.header("🧠 SQL Copilot")
+st.subheader("📌 How it works")
 
-    mode = st.radio("Select Data Source", ["Upload CSV", "Demo Database"])
+st.info("""
+1️⃣ Upload or select dataset  
+2️⃣ Preview data  
+3️⃣ Ask questions in English  
+4️⃣ Get SQL + results + insights  
+""")
 
-    # ── DATA LOAD ──
-    if mode == "Upload CSV":
-        files = st.file_uploader("Upload CSV files", type=["csv"], accept_multiple_files=True)
-
-        if files:
-            conn = load_csv(files)
-            st.session_state.conn = conn
-            st.session_state.schema = get_schema(conn)
-
-            # preview ANY table
-            table = list(st.session_state.schema.keys())[0]
-            st.session_state.preview_df = pd.read_sql_query(f"SELECT * FROM {table} LIMIT 10", conn)
-
-            st.success("CSV loaded")
-
-    else:
-        if st.button("Load Demo Dataset"):
-            conn = create_demo_db()
-            st.session_state.conn = conn
-            st.session_state.schema = get_schema(conn)
-
-            st.session_state.preview_df = pd.read_sql_query("SELECT * FROM sales LIMIT 10", conn)
-
-            st.success("Demo loaded")
-
-    # ── SAMPLE QUESTIONS ──
-    st.divider()
-    st.subheader("💡 Sample Questions")
-
-    st.write("""
-    - Top products by revenue  
-    - Revenue by country  
-    - Find duplicate users  
-    - Average order value  
-    - Sales trend over time  
-    """)
-
-    # ── DATA PREVIEW (IMPORTANT FEATURE) ──
-    st.divider()
-    st.subheader("👀 Data Preview")
-
-    if st.session_state.preview_df is not None:
-        st.dataframe(st.session_state.preview_df, use_container_width=True)
-    else:
-        st.info("Load dataset to preview")
-
-    # ── HOW IT WORKS ──
-    st.divider()
-    st.subheader("ℹ️ How it works")
-    st.write("""
-    1. Load data  
-    2. View schema  
-    3. Ask question  
-    4. Get SQL + results  
-    """)
+st.divider()
 
 # ─────────────────────────────────────────────
-# MAIN UI
+# 2. DATA SOURCE
+# ─────────────────────────────────────────────
+st.subheader("📂 Step 1: Load Data")
+
+mode = st.radio("Choose data source", ["Upload CSV", "Demo Database"])
+
+if mode == "Upload CSV":
+    files = st.file_uploader("Upload CSV files", type=["csv"], accept_multiple_files=True)
+
+    if files:
+        conn = load_csv(files)
+        st.session_state.conn = conn
+        st.session_state.schema = get_schema(conn)
+
+        table = list(st.session_state.schema.keys())[0]
+        st.session_state.preview = pd.read_sql_query(f"SELECT * FROM {table} LIMIT 10", conn)
+
+        st.success("Dataset loaded")
+
+else:
+    if st.button("Load Demo Dataset"):
+        conn = create_demo_db()
+        st.session_state.conn = conn
+        st.session_state.schema = get_schema(conn)
+        st.session_state.preview = pd.read_sql_query("SELECT * FROM sales LIMIT 10", conn)
+
+        st.success("Demo loaded")
+
+# ─────────────────────────────────────────────
+# STOP IF NO DATA
 # ─────────────────────────────────────────────
 if not st.session_state.conn:
-    st.info("👉 Select dataset from sidebar to begin")
     st.stop()
 
+# ─────────────────────────────────────────────
+# 3. PREVIEW DATA
+# ─────────────────────────────────────────────
+st.subheader("👀 Step 2: Data Preview")
+
+st.dataframe(st.session_state.preview, use_container_width=True)
+
+# ─────────────────────────────────────────────
+# 4. SAMPLE QUESTIONS
+# ─────────────────────────────────────────────
+st.subheader("💡 Step 3: Sample Questions")
+
+st.write("""
+- Top products by revenue  
+- Revenue by country  
+- Average order value  
+- Find duplicates  
+- Monthly trends  
+""")
+
+# ─────────────────────────────────────────────
+# 5. SCHEMA
+# ─────────────────────────────────────────────
 st.subheader("🗂 Schema")
 
 for table, cols in st.session_state.schema.items():
@@ -204,20 +198,18 @@ for table, cols in st.session_state.schema.items():
     st.write(cols)
 
 # ─────────────────────────────────────────────
-# QUERY INPUT
+# 6. QUERY INPUT
 # ─────────────────────────────────────────────
-question = st.text_input("💬 Ask your data anything")
+st.subheader("💬 Step 4: Ask Question")
 
-# ─────────────────────────────────────────────
-# EXECUTION
-# ─────────────────────────────────────────────
+question = st.text_input("Ask your data anything")
+
 if question:
 
     model = get_model()
     schema_txt = schema_text(st.session_state.schema)
 
     response = ask_ai(model, schema_txt, question)
-
     sql = extract_sql(response)
 
     st.subheader("🧠 AI Response")
