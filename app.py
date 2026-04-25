@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 import sqlite3
-import google.generativeai as genai
+import genai.GenerativeModel("gemini-1.5-flash-latest") as genai
 import os
 import re
 
