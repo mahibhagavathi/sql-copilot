@@ -9,77 +9,14 @@ import re
 # PAGE CONFIG
 # ─────────────────────────────────────────────
 st.set_page_config(
-    page_title="QueryMeThis 🧠",
+    page_title="AI SQL Copilot",
     page_icon="🧠",
     layout="wide"
 )
 
-# ─────────────────────────────────────────────
-# SAAS UI (FIXED LIGHT THEME)
-# ─────────────────────────────────────────────
-st.markdown("""
-<style>
+st.title("🧠 AI SQL Copilot")
 
-.main {
-    background-color: #f8fafc;
-    color: #111827;
-}
-
-/* Sidebar */
-section[data-testid="stSidebar"] {
-    background-color: #111827;
-    color: white;
-}
-
-/* Cards */
-.card {
-    background: white;
-    padding: 16px;
-    border-radius: 12px;
-    border: 1px solid #e5e7eb;
-    margin-bottom: 12px;
-    box-shadow: 0px 1px 4px rgba(0,0,0,0.05);
-}
-
-/* SQL block */
-.sql-block {
-    background: #0b1220;
-    color: #38bdf8;
-    padding: 12px;
-    border-radius: 10px;
-    font-family: monospace;
-    border: 1px solid #1e3a8a;
-    overflow-x: auto;
-}
-
-/* Insight box */
-.insight-box {
-    background: #ecfdf5;
-    border-left: 4px solid #22c55e;
-    padding: 12px;
-    border-radius: 8px;
-    color: #065f46;
-}
-
-/* Inputs */
-.stTextInput input {
-    border-radius: 10px;
-    border: 1px solid #d1d5db;
-    padding: 10px;
-    color: #111827;
-    background: white;
-}
-
-/* Buttons */
-.stButton button {
-    background-color: #2563eb;
-    color: white;
-    border-radius: 8px;
-    font-weight: 600;
-}
-
-</style>
-""", unsafe_allow_html=True)
+st.write("Ask questions in plain English. Get SQL + results + insights.")
 
 # ─────────────────────────────────────────────
 # GEMINI SETUP
@@ -87,7 +24,7 @@ section[data-testid="stSidebar"] {
 def get_model():
     api_key = st.secrets.get("GEMINI_API_KEY") or os.environ.get("GEMINI_API_KEY")
     if not api_key:
-        st.error("❌ Missing GEMINI_API_KEY")
+        st.error("Missing GEMINI_API_KEY")
         st.stop()
 
     genai.configure(api_key=api_key)
@@ -107,7 +44,7 @@ def load_csv(files):
     return conn
 
 # ─────────────────────────────────────────────
-# DEMO DATABASE (IMPROVED)
+# DEMO DATABASE (REALISTIC)
 # ─────────────────────────────────────────────
 def create_demo_db():
     df = pd.DataFrame({
@@ -161,16 +98,15 @@ def extract_sql(text):
 
 def ask_ai(model, schema_txt, question):
     prompt = f"""
-You are a senior data analyst.
+You are a data analyst.
 
 Schema:
 {schema_txt}
 
-Rules:
-- Return SQL in ```sql``` block
-- Only SELECT queries
-- Then explain in simple English
-- Then give insights
+Return:
+1. SQL query in ```sql``` block
+2. Explanation in simple English
+3. Insight about data
 
 Question:
 {question}
@@ -194,22 +130,14 @@ if "schema" not in st.session_state:
     st.session_state.schema = None
 
 # ─────────────────────────────────────────────
-# SIDEBAR (SAAS ONBOARDING)
+# SIDEBAR (CLEAN)
 # ─────────────────────────────────────────────
 with st.sidebar:
+    st.header("🧠 AI SQL Copilot")
 
-    st.title("🧠 QueryMeThis")
+    st.write("Convert English → SQL instantly")
 
-    st.markdown("""
-    <div class="card">
-    <h4>📌 What is this?</h4>
-    Ask questions in English → get SQL + insights instantly.
-    </div>
-    """, unsafe_allow_html=True)
-
-    st.subheader("📂 Data Source")
-
-    mode = st.radio("Choose", ["Upload CSV", "Demo Database"])
+    mode = st.radio("Select Data Source", ["Upload CSV", "Demo Database"])
 
     if mode == "Upload CSV":
         files = st.file_uploader("Upload CSV", type=["csv"], accept_multiple_files=True)
@@ -217,65 +145,48 @@ with st.sidebar:
         if files:
             st.session_state.conn = load_csv(files)
             st.session_state.schema = get_schema(st.session_state.conn)
-            st.success("CSV loaded!")
+            st.success("CSV loaded")
 
     else:
         if st.button("Load Demo Dataset"):
             st.session_state.conn = create_demo_db()
             st.session_state.schema = get_schema(st.session_state.conn)
-            st.success("Demo loaded!")
+            st.success("Demo loaded")
 
-    # ── Instructions (IMPORTANT UX ADDITION)
-    st.markdown("---")
+    st.divider()
 
-    st.markdown("""
-    <div class="card">
-    <h4>🚀 How to use</h4>
-    <ol>
-        <li>Select data source</li>
-        <li>Check schema</li>
-        <li>Ask questions in English</li>
-        <li>Get SQL + results + insights</li>
-    </ol>
+    st.subheader("How to use")
+    st.write("""
+    1. Load dataset  
+    2. View schema  
+    3. Ask questions  
+    4. Get SQL + results  
+    """)
 
-    <h4>💡 Try asking</h4>
-    <ul>
-        <li>Top products by revenue</li>
-        <li>Revenue by country</li>
-        <li>Find duplicate users</li>
-    </ul>
-    </div>
-    """, unsafe_allow_html=True)
+    st.subheader("Examples")
+    st.write("""
+    - Top products by revenue  
+    - Revenue by country  
+    - Find duplicates  
+    """)
 
 # ─────────────────────────────────────────────
-# MAIN UI
+# MAIN AREA
 # ─────────────────────────────────────────────
-st.title("📊 AI SQL Copilot")
-
 if not st.session_state.conn:
-    st.markdown("""
-    <div class="card">
-    👈 Start by selecting a dataset from sidebar
-    </div>
-    """, unsafe_allow_html=True)
+    st.info("Please load a dataset from sidebar to begin.")
     st.stop()
 
-# ── SCHEMA DISPLAY (FIXED)
-st.subheader("🗂 Schema")
+st.subheader("📊 Schema")
 
 for table, cols in st.session_state.schema.items():
-    st.markdown(f"""
-    <div class="card">
-        <b>📌 {table}</b><br><br>
-        {"<br>".join([f"• {c[0]} <span style='color:gray'>({c[1]})</span>" for c in cols])}
-    </div>
-    """, unsafe_allow_html=True)
+    st.write(f"**{table}**")
+    st.write(cols)
 
-# ── INPUT
-question = st.text_input("💬 Ask your data anything")
+question = st.text_input("Ask your data anything")
 
 # ─────────────────────────────────────────────
-# EXECUTION FLOW
+# EXECUTION
 # ─────────────────────────────────────────────
 if question:
 
@@ -286,17 +197,17 @@ if question:
 
     sql = extract_sql(response)
 
-    st.markdown("### 🧠 AI Response")
+    st.subheader("🧠 AI Response")
     st.write(response)
 
     if sql:
-        st.markdown("### ⚡ SQL Query")
-        st.markdown(f'<div class="sql-block">{sql}</div>', unsafe_allow_html=True)
+        st.subheader("SQL Query")
+        st.code(sql, language="sql")
 
         df, err = run_sql(st.session_state.conn, sql)
 
         if err:
             st.error(err)
         else:
-            st.markdown("### 📊 Results")
-            st.dataframe(df, use_container_width=True)
+            st.subheader("Results")
+            st.dataframe(df)
