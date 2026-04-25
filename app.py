@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-import sqlite3
+from sqlalchemy import create_engine, inspect
 import google.generativeai as genai
 import os
 import re
@@ -15,208 +15,170 @@ st.set_page_config(
 )
 
 st.title("🧠 AI SQL Copilot")
-st.write("Ask questions in plain English → get SQL + results + insights")
+st.write("Connect your data, review the schema, and chat with your database.")
 
 # ─────────────────────────────────────────────
-# GEMINI SETUP (FIXED MODEL)
+# GEMINI SETUP
 # ─────────────────────────────────────────────
 def get_model():
     api_key = st.secrets.get("GEMINI_API_KEY") or os.environ.get("GEMINI_API_KEY")
-
     if not api_key:
-        st.error("❌ Missing GEMINI_API_KEY")
+        st.error("❌ Missing GEMINI_API_KEY. Please set it in secrets or environment variables.")
         st.stop()
-
     genai.configure(api_key=api_key)
-
-    # FIXED MODEL (this is the correct one)
     return genai.GenerativeModel("gemini-1.5-flash-latest")
 
 # ─────────────────────────────────────────────
-# LOAD CSV → SQLITE
+# DATABASE ENGINES
 # ─────────────────────────────────────────────
-def load_csv(files):
-    conn = sqlite3.connect(":memory:")
-
-    for f in files:
-        df = pd.read_csv(f)
-        table = f.name.replace(".csv", "").replace(" ", "_").lower()
-        df.to_sql(table, conn, index=False, if_exists="replace")
-
-    return conn
-
-# ─────────────────────────────────────────────
-# DEMO DATABASE (REALISTIC)
-# ─────────────────────────────────────────────
-def create_demo_db():
-    df = pd.DataFrame({
-        "order_id": range(1, 21),
-        "user_id": [101, 102, 103, 104, 105] * 4,
-        "product": ["Laptop", "Phone", "Shoes", "Watch", "Headphones"] * 4,
-        "category": ["Electronics", "Electronics", "Fashion", "Accessories", "Electronics"] * 4,
-        "amount": [1200, 800, 120, 250, 150] * 4,
-        "country": ["IN", "US", "UK", "IN", "US"] * 4,
-        "date": pd.date_range("2024-01-01", periods=20)
-    })
-
-    conn = sqlite3.connect(":memory:")
-    df.to_sql("sales", conn, index=False, if_exists="replace")
-    return conn
+def get_engine(connection_type, **kwargs):
+    """Factory to create SQLAlchemy engines based on user input."""
+    try:
+        if connection_type == "SQLite (In-Memory)":
+            return create_engine("sqlite:///:memory:")
+        
+        elif connection_type == "External SQL Database":
+            # Expecting a SQLAlchemy URI like: postgresql://user:pass@host:port/dbname
+            uri = kwargs.get("uri")
+            if not uri:
+                st.error("Please provide a valid Connection URI")
+                return None
+            return create_engine(uri)
+    except Exception as e:
+        st.error(f"Connection Error: {e}")
+        return None
 
 # ─────────────────────────────────────────────
-# SCHEMA HELPERS
+# SCHEMA & METADATA
 # ─────────────────────────────────────────────
-def get_schema(conn):
-    schema = {}
-    cursor = conn.cursor()
+def fetch_schema_info(engine):
+    """Uses SQLAlchemy inspection to get tables and columns."""
+    schema_dict = {}
+    try:
+        inspector = inspect(engine)
+        for table_name in inspector.get_table_names():
+            columns = inspector.get_columns(table_name)
+            schema_dict[table_name] = [{"name": c["name"], "type": str(c["type"])} for c in columns]
+        return schema_dict
+    except Exception as e:
+        st.error(f"Error fetching schema: {e}")
+        return {}
 
-    tables = cursor.execute(
-        "SELECT name FROM sqlite_master WHERE type='table';"
-    ).fetchall()
-
-    for (t,) in tables:
-        cols = cursor.execute(f"PRAGMA table_info({t})").fetchall()
-        schema[t] = [(c[1], c[2]) for c in cols]
-
-    return schema
-
-
-def schema_text(schema):
-    out = []
-    for t, cols in schema.items():
-        col_str = ", ".join([f"{c[0]} ({c[1]})" for c in cols])
-        out.append(f"{t}: {col_str}")
-    return "\n".join(out)
+def schema_to_text(schema_dict):
+    """Converts schema dict to a prompt-friendly string."""
+    text_parts = []
+    for table, cols in schema_dict.items():
+        col_str = ", ".join([f"{c['name']} ({c['type']})" for c in cols])
+        text_parts.append(f"Table '{table}' has columns: {col_str}")
+    return "\n".join(text_parts)
 
 # ─────────────────────────────────────────────
-# AI SQL GENERATION
+# AI LOGIC
 # ─────────────────────────────────────────────
-def extract_sql(text):
-    match = re.search(r"```sql(.*?)```", text, re.DOTALL)
-    if match:
-        return match.group(1).strip()
-    return ""
-
-
 def ask_ai(model, schema_txt, question):
     prompt = f"""
-You are a senior data analyst.
+    You are an expert SQL Data Analyst.
+    
+    Database Schema:
+    {schema_txt}
 
-You convert English → SQL.
+    Task:
+    1. Provide a standard SQL SELECT query to answer: "{question}"
+    2. Wrap the SQL in ```sql blocks.
+    3. Provide a brief explanation of how the query works.
+    4. Suggest one interesting business insight the user could look for in this data.
 
-Schema:
-{schema_txt}
+    Constraints:
+    - Use standard SQL syntax.
+    - If the user asks for something not in the schema, politely explain why.
+    """
+    response = model.generate_content(prompt)
+    return response.text
 
-Rules:
-- Return ONLY SQL inside ```sql``` block
-- Only SELECT queries
-- Then explain in simple English
-- Then give 1 insight
-
-Question:
-{question}
-"""
-    return model.generate_content(prompt).text
-
-
-def run_sql(conn, sql):
-    try:
-        df = pd.read_sql_query(sql, conn)
-        return df, None
-    except Exception as e:
-        return None, str(e)
+def extract_sql(text):
+    match = re.search(r"```sql(.*?)```", text, re.DOTALL)
+    return match.group(1).strip() if match else None
 
 # ─────────────────────────────────────────────
-# SESSION STATE
-# ─────────────────────────────────────────────
-if "conn" not in st.session_state:
-    st.session_state.conn = None
-
-if "schema" not in st.session_state:
-    st.session_state.schema = None
-
-# ─────────────────────────────────────────────
-# SIDEBAR
+# SIDEBAR / CONNECTION MANAGEMENT
 # ─────────────────────────────────────────────
 with st.sidebar:
-    st.header("🧠 SQL Copilot")
+    st.header("🔌 Data Source")
+    
+    source_type = st.selectbox("Select Source", 
+        ["Demo Dataset", "Upload CSV", "External SQL Database"]
+    )
 
-    st.write("Convert English → SQL instantly")
+    # Initialize or reset engine
+    if "engine" not in st.session_state:
+        st.session_state.engine = None
+    if "schema" not in st.session_state:
+        st.session_state.schema = None
 
-    mode = st.radio("Choose Data Source", ["Upload CSV", "Demo Database"])
+    if source_type == "Demo Dataset":
+        if st.button("Load Demo Data"):
+            engine = get_engine("SQLite (In-Memory)")
+            df = pd.DataFrame({
+                "order_id": [1, 2, 3], "amount": [100, 200, 150], "category": ["Tech", "Fashion", "Tech"]
+            })
+            df.to_sql("sales", engine, index=False)
+            st.session_state.engine = engine
+            st.session_state.schema = fetch_schema_info(engine)
+            st.success("Demo Loaded!")
 
-    if mode == "Upload CSV":
-        files = st.file_uploader("Upload CSV files", type=["csv"], accept_multiple_files=True)
+    elif source_type == "Upload CSV":
+        uploaded_files = st.file_uploader("Upload CSVs", type="csv", accept_multiple_files=True)
+        if uploaded_files and st.button("Process Files"):
+            engine = get_engine("SQLite (In-Memory)")
+            for f in uploaded_files:
+                table_name = f.name.split('.')[0].replace(" ", "_").lower()
+                pd.read_csv(f).to_sql(table_name, engine, index=False)
+            st.session_state.engine = engine
+            st.session_state.schema = fetch_schema_info(engine)
+            st.success(f"Loaded {len(uploaded_files)} tables!")
 
-        if files:
-            st.session_state.conn = load_csv(files)
-            st.session_state.schema = get_schema(st.session_state.conn)
-            st.success("CSV loaded")
-
-    else:
-        if st.button("Load Demo Dataset"):
-            st.session_state.conn = create_demo_db()
-            st.session_state.schema = get_schema(st.session_state.conn)
-            st.success("Demo loaded")
-
-    st.divider()
-
-    st.subheader("How it works")
-    st.write("""
-    1. Load dataset  
-    2. View schema  
-    3. Ask question  
-    4. Get SQL + results  
-    """)
-
-    st.subheader("Example queries")
-    st.write("""
-    - Top products by revenue  
-    - Revenue by country  
-    - Find duplicates  
-    """)
-
-# ─────────────────────────────────────────────
-# MAIN UI
-# ─────────────────────────────────────────────
-if not st.session_state.conn:
-    st.info("👉 Select dataset from sidebar to start")
-    st.stop()
-
-st.subheader("🗂 Schema")
-
-for table, cols in st.session_state.schema.items():
-    st.write(f"**{table}**")
-    st.write(cols)
+    elif source_type == "External SQL Database":
+        st.info("Format: postgresql://user:pass@host:port/dbname")
+        db_uri = st.text_input("Connection URI", type="password")
+        if st.button("Connect"):
+            engine = get_engine("External SQL Database", uri=db_uri)
+            if engine:
+                st.session_state.engine = engine
+                st.session_state.schema = fetch_schema_info(engine)
+                st.success("Connected to External DB!")
 
 # ─────────────────────────────────────────────
-# USER INPUT
+# MAIN INTERFACE
 # ─────────────────────────────────────────────
-question = st.text_input("💬 Ask your data anything")
-
-# ─────────────────────────────────────────────
-# EXECUTION
-# ─────────────────────────────────────────────
-if question:
-
-    model = get_model()
-    schema_txt = schema_text(st.session_state.schema)
-
-    response = ask_ai(model, schema_txt, question)
-
-    sql = extract_sql(response)
-
-    st.subheader("🧠 AI Response")
-    st.write(response)
-
-    if sql:
-        st.subheader("⚡ SQL Query")
-        st.code(sql, language="sql")
-
-        df, err = run_sql(st.session_state.conn, sql)
-
-        if err:
-            st.error(err)
+if st.session_state.engine:
+    # --- SCHEMA VIEWER ---
+    with st.expander("🗂️ View Database Schema", expanded=False):
+        if st.session_state.schema:
+            for table, cols in st.session_state.schema.items():
+                st.markdown(f"**Table: `{table}`**")
+                st.table(pd.DataFrame(cols))
         else:
-            st.subheader("📊 Results")
-            st.dataframe(df, use_container_width=True)
+            st.warning("No schema detected.")
+
+    # --- CHAT INTERFACE ---
+    user_query = st.chat_input("Ask a question about your data...")
+
+    if user_query:
+        with st.spinner("Analyzing..."):
+            model = get_model()
+            schema_txt = schema_to_text(st.session_state.schema)
+            ai_response = ask_ai(model, schema_txt, user_query)
+            
+            st.markdown("### 🤖 AI Analysis")
+            st.write(ai_response)
+
+            sql_query = extract_sql(ai_response)
+            if sql_query:
+                try:
+                    results_df = pd.read_sql(sql_query, st.session_state.engine)
+                    st.markdown("### 📊 Query Results")
+                    st.dataframe(results_df, use_container_width=True)
+                except Exception as e:
+                    st.error(f"The generated SQL failed to run: {e}")
+else:
+    st.info("👋 Use the sidebar to connect a database or upload a file to get started.")
